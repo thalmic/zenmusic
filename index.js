@@ -8,14 +8,7 @@ config.argv()
   .env()
   .file({ file: 'config.json' })
   .defaults({
-    'adminChannel': 'music-admin',
-    'standardChannel': 'music',
-    'gongLimit': 3,
-    'voteLimit': 3,
-    'maxVolume': '75',
-    'market': 'US',
-    'blacklist': [],
-    'searchLimit': 7,
+    'searchLimit': 5,
     'logLevel': 'info',
   })
 
@@ -26,11 +19,6 @@ const clientId = config.get('spotifyClientId')
 const clientSecret = config.get('spotifyClientSecret')
 const searchLimit = config.get('searchLimit')
 const logLevel = config.get('logLevel')
-
-let blacklist = config.get('blacklist')
-if (!Array.isArray(blacklist)) {
-  blacklist = blacklist.replace(/\s*(,|^|$)\s*/g, '$1').split(/\s*,\s*/)
-}
 
 /* Initialize Logger */
 const logger = winston.createLogger({
@@ -44,16 +32,11 @@ const logger = winston.createLogger({
 /* Initialize Sonos */
 const SONOS = require('sonos')
 const Sonos = SONOS.Sonos
-const sonos = new Sonos(config.get('sonos'))
-
-if (market !== 'US') {
-  sonos.setSpotifyRegion(SONOS.SpotifyRegion.EU)
-  logger.info('Setting Spotify region to EU...')
-  logger.info("Market is: " + market)
-}
+const speakers = config.get('sonos').map((speaker) => new Sonos(speaker));
+const sonos = speakers[0];
 
 /* Initialize Spotify instance */
-const spotify = Spotify({clientId: clientId, clientSecret: clientSecret, market: market, logger: logger})
+const spotify = Spotify({clientId: clientId, clientSecret: clientSecret, market: 'US', logger: logger})
 
 const RtmClient = require('@slack/client').RtmClient
 const RTM_EVENTS = require('@slack/client').RTM_EVENTS
@@ -65,7 +48,6 @@ let slack = new RtmClient(token, {
   autoReconnect: true,
   autoMark: true
 })
-
 
 /* Slack handlers */
 slack.on('open', function () {
@@ -123,12 +105,6 @@ slack.on(RTM_EVENTS.MESSAGE, (message) => {
         }).join(' ')
 
         logger.error('Could not respond. ' + errors)
-        return false
-    }
-
-    if (blacklist.indexOf(userName) !== -1) {
-        logger.info('User ' + userName + ' is blacklisted')
-        _slackMessage('Nice try ' + userName + ", you're banned :)", channel.id)
         return false
     }
 
@@ -198,9 +174,6 @@ function processInput(text, channel, userName) {
                 break
             case 'previous':
                 _previous(input, channel)
-                break
-            case 'blacklist':
-                _blacklist(input, channel)
                 break
             case 'remove':
                 _removeTrack(input, channel)
@@ -303,9 +276,12 @@ function _previous (input, channel) {
   if (channel.name !== adminChannel) {
     return
   }
-  sonos.previous(function (err, previous) {
-    logger.error(err + ' ' + previous)
-  })
+
+  speakers.forEach((speaker) => {
+    speaker.previous(function (err, previous) {
+      logger.error(`speaker ${speaker.ip} had error: ${err} ${previous}`);
+    });
+  });
 }
 
 function _help (input, channel) {
@@ -324,10 +300,7 @@ function _help (input, channel) {
             '`pause` : pause life\n' +
             '`resume` : resume after pause\n' +
             '`next` : play next track\n' +
-            '`previous` : play previous track\n' +
-            '`blacklist` : show users on blacklist\n' +
-            '`blacklist add @username` : add `@username` to the blacklist\n' +
-            '`blacklist del @username` : remove `@username` from the blacklist\n'
+            '`previous` : play previous track\n'
   }
   message += ' ===  ===  ===  ===  ===  ===  === \n'
   _slackMessage(message, channel.id)
@@ -337,83 +310,110 @@ function _play (input, channel, state) {
   if (channel.name !== adminChannel) {
     return
   }
-  speaker
 
-  sonos.selectQueue();
-  sonos.play().then(result => {
-    _status(channel, state)
-    logger.info('Started playing - ' + result)
-  }).catch(err => { logger.info('Error occurred: ' + err) })
+  speakers.forEach((speaker) => {
+    speaker.selectQueue();
+    speaker.play().then(result => {
+      logger.info(`speaker ${speaker.ip} started playing - ${result}`)
+    }).catch(err => { logger.error(`speaker ${speaker.ip} had error: ${err}`) })
+  })
+
+  _status(channel, state);
 }
 
 function _playInt (input, channel) {
-  sonos.selectQueue();
-  sonos.play().then(result => {
-    logger.info('playInt started playing' + result)
-  }).catch(err => { logger.error('Error occurred: ' + err) })
+  speakers.forEach((speaker) => {
+    speaker.selectQueue();
+    speaker.play().then(result => {
+      logger.info(`speaker ${speaker.ip} playInt started playing` + result)
+    }).catch(err => { logger.error(`speaker ${speaker.ip} had error: ${err}`) })
+  })
 }
 
 function _stop (input, channel, state) {
   if (channel.name !== adminChannel) {
     return
   }
-  sonos.stop().then(result => {
-    _status(channel, state)
-    logger.info('Stoped playing - ' + result)
-  }).catch(err => { logger.error('Error occurred: ' + err) })
+
+  speakers.forEach((speaker) => {
+    speaker.stop().then(result => {
+      logger.info(`speaker ${speaker.ip} stoped playing - ${result}`)
+    }).catch(err => { logger.error(`speaker ${speaker.ip} had error: ${err}`) })
+  })
+
+  _status(channel, state)
 }
 
 function _pause (input, channel, state) {
   if (channel.name !== adminChannel) {
     return
   }
-  sonos.pause().then(result => {
-    _status(channel, state)
-    logger.info('Pause playing - ' + result)
-  }).catch(err => { logger.error('Error occurred: ' + err) })
+
+  speakers.forEach((speaker) => {
+    speaker.pause().then(result => {
+      logger.info(`speaker ${speaker.ip} pause playing - ${result}`)
+    }).catch(err => { logger.error(`speaker ${speaker.ip} had error: ${err}`) })
+  })
+
+  _status(channel, state)
 }
 
 function _resume (input, channel, state) {
   if (channel.name !== adminChannel) {
     return
   }
-  sonos.play().then(result => {
-    setTimeout(() => _status(channel, state), 500)
-    logger.info('Resume playing - ' + result)
-  }).catch(err => { logger.error('Error occurred: ' + err) })
+
+  speakers.forEach((speaker) => {
+    speaker.play().then(result => {
+      logger.info(`speaker ${speaker.ip} resume playing - ${result}`)
+    }).catch(err => { logger.error(`speaker ${speaker.ip} had error: ${err}`) })
+  });
+
+  setTimeout(() => _status(channel, state), 500)
 }
 
 function _flush (input, channel) {
   if (channel.name !== adminChannel) {
     return
   }
-  sonos.flush().then(result => {
-    logger.info('Flushed queue: ' + JSON.stringify(result, null, 2))
-    _slackMessage('Sonos queue is clear.', channel.id)
-  }).catch(err => {
-    logger.error('Error flushing queue: ' + err)
+
+  speaker.forEach((speaker) => {
+    speaker.flush().then(result => {
+      logger.info(`speaker ${speaker.ip} flushed queue: ${JSON.stringify(result, null, 2)}`)
+    }).catch(err => {
+      logger.error(`speaker ${speaker.ip} had error: ${err}`)
+    })
   })
+
+  _slackMessage('Sonos queue is clear.', channel.id)
 }
 
-function _removeTrack (input, channel, byPassChannelValidation) {
-  if (channel.name !== adminChannel && !byPassChannelValidation) {
+function _removeTrack (input, channel) {
+  if (channel.name !== adminChannel) {
     return
   }
-	var trackNb = parseInt(input[1])+1
-  		sonos.removeTracksFromQueue(trackNb, 1).then(success => {
-        	logger.info('Removed track with index: ', trackNb)
-          		}).catch(err => { logger.error('Error occurred ' + err) })
-     	var message = 'Removed track with index: ' + input[1]
-      _slackMessage(message, channel.id)
-          }
 
-function _nextTrack (channel, byPassChannelValidation) {
-  if (channel.name !== adminChannel && !byPassChannelValidation) {
+  var trackNb = parseInt(input[1]) + 1;
+
+  speaker.forEach((speaker) => {
+    speaker.removeTracksFromQueue(trackNb, 1).then(success => {
+        logger.info(`speaker ${speaker.ip} removed track with index: ${trackNb}`)
+    }).catch(err => { logger.error(`speaker ${speaker.ip} had error: ${err}`) })
+  })
+
+  _slackMessage(`Removed track with index ${input[1]}`, channel.id)
+}
+
+function _nextTrack (channel) {
+  if (channel.name !== adminChannel) {
     return
   }
-  sonos.next().then(success => {
-    logger.info('_nextTrack > Playing Netx track.. ')
-  }).catch(err => { logger.error('Error occurred', err) })
+
+  speaker.forEach((speaker) => {
+    sonos.next().then(success => {
+      logger.info(`speaker ${speaker.ip} _nextTrack > Playing Next track.. `)
+    }).catch(err => { logger.error(`speaker ${speaker.ip} had error: ${err}`) })
+  })
 }
 
 function _currentTrack (channel, cb, err) {
@@ -551,49 +551,13 @@ function _addToSpotify (userName, uri, albumImg, trackName, channel, cb) {
 }
 
 function _status (channel, state) {
-  sonos.getCurrentState().then(state => {
-    logger.info('Got current state: ' + state)
-    _slackMessage("Sonos state is '" + state + "'", channel.id)
-  }).catch(err => { logger.error('Error occurred ' + err) })
-}
+  speakers.forEach((speaker) => {
+    speaker.getCurrentState().then(state => {
+      logger.info(`speaker ${speaker.ip} current state: ${state}`)
+    }).catch(err => { logger.error(`speaker ${speaker.ip} had error: ${err}`)})
+  })
 
-function _blacklist (input, channel) {
-  if (channel.name !== adminChannel) {
-    return
-  }
-
-  var action = ((input[1]) ? input[1] : '')
-  var slackUser = ((input[2]) ? slack.dataStore.getUserById(input[2].slice(2, -1)) : '')
-
-  if (input[2] !== '' && typeof slackUser !== 'undefined') {
-    var username = '@' + slackUser.name
-  } else if (input[2] !== '') {
-    var message = 'The user ' + (input[2]) + ' is not a valid Slack user.'
-  }
-
-  if (action === '') {
-    message = 'The following users are blacklisted:\n```\n' + blacklist.join('\n') + '\n```'
-  } else if (typeof username !== 'undefined') {
-    if (action === 'add') {
-      var i = blacklist.indexOf(username)
-      if (i === -1) {
-        blacklist.push(username)
-        message = 'The user ' + username + ' has been added to the blacklist.'
-      } else {
-        message = 'The user ' + username + ' is already on the blacklist.'
-      }
-    } else if (action === 'del') {
-      if (i !== -1) {
-        blacklist.splice(i, 1)
-        message = 'The user ' + username + ' has been removed from the blacklist.'
-      } else {
-        message = 'The user ' + username + ' is not on the blacklist.'
-      }
-    } else {
-      message = 'Usage: `blacklist add|del @username`'
-    }
-  }
-  _slackMessage(message, channel.id)
+  _slackMessage(`Sonos state is '${state}'`, channel.id)
 }
 
 module.exports = function (number, locale) {
